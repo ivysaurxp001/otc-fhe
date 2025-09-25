@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { ethers } from "ethers";
 import { BlindEscrowV2ABI } from "../abi/BlindEscrowV2ABI";
-//import { RelayerClient } from "@zama-fhe/relayer-sdk";
+import { useFhevm } from "@fhevm/react";
+import { useMetaMaskEthersSigner } from "./metamask/useMetaMaskEthersSigner";
 
 type Mode = 0 | 1; // 0=P2P, 1=OPEN
 
@@ -18,24 +19,30 @@ interface DealInfo {
 export function useBlindEscrowV2(contractAddress: string) {
   const [busy, setBusy] = useState(false);
   
+  // Use MetaMask signer for FHEVM
+  const {
+    provider,
+    chainId,
+    initialMockChains,
+  } = useMetaMaskEthersSigner();
+  
+  const { instance, status, error } = useFhevm({
+    provider,
+    chainId,
+    initialMockChains,
+    enabled: true,
+  });
+  
+  // FHEVM readiness state
+  const isFhevmReady = !!instance && status === 'ready';
+  
   const getSigner = useCallback(async () => {
-    if (!(window as any).ethereum) {
-      throw new Error("MetaMask not installed");
+    if (!provider) {
+      throw new Error("Provider not available");
     }
-    const provider = new ethers.BrowserProvider((window as any).ethereum);
-    return await provider.getSigner();
-  }, []);
-
-  // Real FHEVM Relayer client
-  const getRelayerClient = useCallback(async () => {
-    const signer = await getSigner();
-    return new RelayerClient({
-      relayerUrl: process.env.NEXT_PUBLIC_RELAYER_URL!,
-      rpcUrl: process.env.NEXT_PUBLIC_RPC_URL!,
-      chainId: Number(process.env.NEXT_PUBLIC_CHAIN_ID),
-      wallet: signer
-    });
-  }, [getSigner]);
+    const ethersProvider = new ethers.BrowserProvider(provider);
+    return await ethersProvider.getSigner();
+  }, [provider]);
 
   // Validation function for ciphertext
   const looksLikeCiphertext = (x: string) => {
@@ -159,10 +166,23 @@ export function useBlindEscrowV2(contractAddress: string) {
         throw error;
       }
 
-      // Encrypt values using real FHEVM Relayer
-      const relayer = await getRelayerClient();
-      const encAsk = await relayer.encryptU32(ask);
-      const encThreshold = await relayer.encryptU32(threshold);
+      // Encrypt values using FHEVM instance
+      if (!instance) {
+        throw new Error(`FHEVM instance not available. Status: ${status}, Provider: ${!!provider}, ChainId: ${chainId}`);
+      }
+      
+      const sellerSigner = await getSigner();
+      const inputAsk = instance.createEncryptedInput(contractAddress, sellerSigner.address);
+      inputAsk.add32(ask);
+      const encAskResult = await inputAsk.encrypt();
+      
+      const inputThreshold = instance.createEncryptedInput(contractAddress, sellerSigner.address);
+      inputThreshold.add32(threshold);
+      const encThresholdResult = await inputThreshold.encrypt();
+      
+      // Convert FHEVM result to string format expected by contract
+      const encAsk = `0x${Buffer.from(encAskResult.inputProof).toString('hex')}`;
+      const encThreshold = `0x${Buffer.from(encThresholdResult.inputProof).toString('hex')}`;
       
       console.log("Encrypted values:", {
         encAsk,
@@ -193,7 +213,7 @@ export function useBlindEscrowV2(contractAddress: string) {
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, getRelayerClient]);
+  }, [contractAddress, getSigner, instance]);
 
   const placeBid = useCallback(async (
     dealId: bigint, 
@@ -203,8 +223,8 @@ export function useBlindEscrowV2(contractAddress: string) {
   ) => {
     setBusy(true);
     try {
-      const signer = await getSigner();
-      const userAddress = await signer.getAddress();
+      const buyerSigner = await getSigner();
+      const userAddress = await buyerSigner.getAddress();
       
       // ERC20 ABI for approve and allowance
       const erc20Abi = [
@@ -212,7 +232,7 @@ export function useBlindEscrowV2(contractAddress: string) {
         "function allowance(address owner, address spender) external view returns (uint256)"
       ];
       
-      const erc20 = new ethers.Contract(paymentToken, erc20Abi, signer);
+      const erc20 = new ethers.Contract(paymentToken, erc20Abi, buyerSigner);
       
       // Check and approve if needed
       const allowance = await erc20.allowance(userAddress, contractAddress);
@@ -225,12 +245,20 @@ export function useBlindEscrowV2(contractAddress: string) {
       const contract = new ethers.Contract(
         contractAddress,
         BlindEscrowV2ABI,
-        signer
+        buyerSigner
       );
       
-      // Encrypt bid using real FHEVM Relayer
-      const relayer = await getRelayerClient();
-      const encBid = await relayer.encryptU32(bid);
+      // Encrypt bid using FHEVM instance
+      if (!instance) {
+        throw new Error(`FHEVM instance not available. Status: ${status}, Provider: ${!!provider}, ChainId: ${chainId}`);
+      }
+      
+      const inputBid = instance.createEncryptedInput(contractAddress, buyerSigner.address);
+      inputBid.add32(bid);
+      const encBidResult = await inputBid.encrypt();
+      
+      // Convert FHEVM result to string format expected by contract
+      const encBid = `0x${Buffer.from(encBidResult.inputProof).toString('hex')}`;
       
       console.log("Encrypted bid:", {
         encBid,
@@ -247,7 +275,7 @@ export function useBlindEscrowV2(contractAddress: string) {
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, getRelayerClient]);
+  }, [contractAddress, getSigner, instance]);
 
   const computeOutcome = useCallback(async (dealId: bigint) => {
     setBusy(true);
@@ -330,8 +358,11 @@ export function useBlindEscrowV2(contractAddress: string) {
     }
   }, [contractAddress, getSigner]);
 
-  return { 
-    busy, 
+  return {
+    busy,
+    isFhevmReady,
+    fhevmStatus: status,
+    fhevmError: error,
     createDeal, 
     sellerSubmit, 
     placeBid, 

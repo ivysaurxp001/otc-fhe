@@ -47,6 +47,9 @@ export default function BlindEscrowDemo() {
   const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
   const { 
     busy, 
+    isFhevmReady,
+    fhevmStatus,
+    fhevmError,
     createDeal, 
     sellerSubmit, 
     placeBid, 
@@ -75,6 +78,18 @@ export default function BlindEscrowDemo() {
   const [error, setError] = useState<string>("");
 
   const clearError = () => setError("");
+
+  // Debug FHEVM status
+  console.log("FHEVM Debug:", {
+    isFhevmReady,
+    fhevmStatus,
+    fhevmError,
+    dealToken: deal.token,
+    dealAmount: deal.amount,
+    dealMode: deal.mode,
+    dealBuyerOpt: deal.buyerOpt,
+    buttonDisabled: busy || !deal.token || !deal.amount || (deal.mode === 0 && !deal.buyerOpt)
+  });
 
   // Step 1: Create Deal
   const handleCreateDeal = async () => {
@@ -253,6 +268,7 @@ export default function BlindEscrowDemo() {
             ✅ <strong>Contract đã được deploy!</strong><br/>
             Contract Address: <code className="text-sm">{contractAddress}</code><br/>
             Oracle Address: <code className="text-sm">{process.env.NEXT_PUBLIC_ORACLE_ADDRESS}</code><br/>
+            FHEVM Status: <code className="text-sm">{isFhevmReady ? '✅ Ready' : `⏳ ${fhevmStatus}`}</code><br/>
             Network: {process.env.NEXT_PUBLIC_NETWORK} (Chain ID: {process.env.NEXT_PUBLIC_CHAIN_ID})
           </AlertDescription>
         </Alert>
@@ -417,7 +433,7 @@ export default function BlindEscrowDemo() {
 
                 <Button 
                   onClick={handleSellerSubmit} 
-                  disabled={busy || !deal.ask || !deal.threshold}
+                  disabled={busy || !isFhevmReady || !deal.ask || !deal.threshold}
                   className="w-full"
                 >
                   {busy && <span className="mr-2">⏳</span>}
@@ -453,7 +469,7 @@ export default function BlindEscrowDemo() {
 
                 <Button 
                   onClick={handlePlaceBid} 
-                  disabled={busy || !deal.bid}
+                  disabled={busy || !isFhevmReady || !deal.bid}
                   className="w-full"
                 >
                   {busy && <span className="mr-2">⏳</span>}
