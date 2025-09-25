@@ -1,5 +1,7 @@
 import { useCallback, useState } from "react";
 import { ethers } from "ethers";
+import { BlindEscrowV2ABI } from "../abi/BlindEscrowV2ABI";
+//import { RelayerClient } from "@zama-fhe/relayer-sdk";
 
 type Mode = 0 | 1; // 0=P2P, 1=OPEN
 
@@ -16,21 +18,30 @@ interface DealInfo {
 export function useBlindEscrowV2(contractAddress: string) {
   const [busy, setBusy] = useState(false);
   
-  // Mock FHEVM instance for demo
-  const instance = {
-    encrypt32: async (value: number) => {
-      // Mock encryption - in real app, this would use FHEVM SDK
-      return `0x${value.toString(16).padStart(64, '0')}`;
-    }
-  };
-
   const getSigner = useCallback(async () => {
-    if (!window.ethereum) {
+    if (!(window as any).ethereum) {
       throw new Error("MetaMask not installed");
     }
-    const provider = new ethers.BrowserProvider(window.ethereum);
+    const provider = new ethers.BrowserProvider((window as any).ethereum);
     return await provider.getSigner();
   }, []);
+
+  // Real FHEVM Relayer client
+  const getRelayerClient = useCallback(async () => {
+    const signer = await getSigner();
+    return new RelayerClient({
+      relayerUrl: process.env.NEXT_PUBLIC_RELAYER_URL!,
+      rpcUrl: process.env.NEXT_PUBLIC_RPC_URL!,
+      chainId: Number(process.env.NEXT_PUBLIC_CHAIN_ID),
+      wallet: signer
+    });
+  }, [getSigner]);
+
+  // Validation function for ciphertext
+  const looksLikeCiphertext = (x: string) => {
+    // ciphertext thường dài > 200 hex chars
+    return typeof x === "string" && x.startsWith("0x") && x.length > 200;
+  };
 
   const createDeal = useCallback(async (
     mode: Mode, 
@@ -43,12 +54,35 @@ export function useBlindEscrowV2(contractAddress: string) {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress, 
-        [
-          "function createDeal(uint8 mode, address paymentToken, uint256 amount, address buyerOpt) external returns (uint256)",
-          "event DealCreated(uint256 indexed id, uint8 mode, address indexed seller, address indexed buyerOpt, address token, uint256 amount)"
-        ], 
+        BlindEscrowV2ABI,
         signer
       );
+      
+      console.log("Contract address:", contractAddress);
+      console.log("Signer address:", await signer.getAddress());
+      
+      // Check network
+      const network = await signer.provider.getNetwork();
+      console.log("Network:", {
+        name: network.name,
+        chainId: network.chainId.toString()
+      });
+      
+      // Check contract code
+      const code = await signer.provider.getCode(contractAddress);
+      console.log("Contract code length:", code.length);
+      if (code === "0x") {
+        throw new Error("No contract found at address. Please check contract deployment.");
+      }
+      
+      console.log("Parameters:", { 
+        mode, 
+        modeType: typeof mode,
+        token, 
+        amount, 
+        buyerOpt: buyerOpt ?? ethers.ZeroAddress 
+      });
+      console.log("Raw parameters for contract call:", [mode, token, amount, buyerOpt ?? ethers.ZeroAddress]);
       
       const tx = await contract.createDeal(
         mode, 
@@ -57,6 +91,9 @@ export function useBlindEscrowV2(contractAddress: string) {
         buyerOpt ?? ethers.ZeroAddress
       );
       return await tx.wait();
+    } catch (error: any) {
+      console.error("CreateDeal error:", error);
+      throw error;
     } finally { 
       setBusy(false); 
     }
@@ -72,23 +109,91 @@ export function useBlindEscrowV2(contractAddress: string) {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
-        [
-          "function sellerSubmit(uint256 id, bytes calldata encAsk, bytes calldata encThreshold) external",
-          "event SellerSubmitted(uint256 indexed id)"
-        ],
+        BlindEscrowV2ABI,
         signer
       );
 
-      // Encrypt values using fhevm
-      const encAsk = await instance.encrypt32(ask);
-      const encThreshold = await instance.encrypt32(threshold);
+      console.log("SellerSubmit parameters:", {
+        dealId: dealId.toString(),
+        ask,
+        threshold
+      });
+
+      // Check contract first
+      try {
+        const version = await contract.version();
+        console.log("Contract version:", version);
+      } catch (versionError) {
+        console.error("Contract version check failed:", versionError);
+        throw new Error("Contract not accessible. Please check contract address and network.");
+      }
+
+      // Check deal state first
+      try {
+        const dealInfo = await contract.getDealPublic(dealId);
+        console.log("Deal info before submit:", {
+          mode: dealInfo[0].toString(),
+          state: dealInfo[1].toString(),
+          stateType: typeof dealInfo[1],
+          stateNumber: Number(dealInfo[1]),
+          seller: dealInfo[2],
+          buyer: dealInfo[3],
+          token: dealInfo[4],
+          amount: dealInfo[5].toString(),
+          success: dealInfo[6]
+        });
+        
+        // Check if deal is in correct state (1 = Created)
+        const dealState = Number(dealInfo[1]);
+        if (dealState !== 1) {
+          throw new Error(`Deal is in wrong state: ${dealState}. Expected state 1 (Created)`);
+        }
+        
+        // Check if caller is the seller
+        const signerAddress = await signer.getAddress();
+        if (dealInfo[2].toLowerCase() !== signerAddress.toLowerCase()) {
+          throw new Error(`Caller ${signerAddress} is not the seller ${dealInfo[2]}`);
+        }
+      } catch (error) {
+        console.error("Deal validation error:", error);
+        throw error;
+      }
+
+      // Encrypt values using real FHEVM Relayer
+      const relayer = await getRelayerClient();
+      const encAsk = await relayer.encryptU32(ask);
+      const encThreshold = await relayer.encryptU32(threshold);
+      
+      console.log("Encrypted values:", {
+        encAsk,
+        encThreshold,
+        lenAsk: encAsk?.length,
+        lenThr: encThreshold?.length,
+      });
+
+      // Validate ciphertexts
+      if (!looksLikeCiphertext(encAsk) || !looksLikeCiphertext(encThreshold)) {
+        throw new Error("Encryption failed: not a valid FHE ciphertext");
+      }
+      
+      // Try static call first to see the exact error
+      try {
+        await contract.sellerSubmit.staticCall(dealId, encAsk, encThreshold);
+        console.log("Static call successful, proceeding with transaction...");
+      } catch (staticError) {
+        console.error("Static call failed:", staticError);
+        throw staticError;
+      }
       
       const tx = await contract.sellerSubmit(dealId, encAsk, encThreshold);
       return await tx.wait();
+    } catch (error: any) {
+      console.error("SellerSubmit error:", error);
+      throw error;
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, instance]);
+  }, [contractAddress, getSigner, getRelayerClient]);
 
   const placeBid = useCallback(async (
     dealId: bigint, 
@@ -119,20 +224,30 @@ export function useBlindEscrowV2(contractAddress: string) {
       // BlindEscrow contract
       const contract = new ethers.Contract(
         contractAddress,
-        [
-          "function placeBid(uint256 id, bytes calldata encBid) external",
-          "event BidPlaced(uint256 indexed id, address indexed buyer)"
-        ],
+        BlindEscrowV2ABI,
         signer
       );
       
-      const encBid = await instance.encrypt32(bid);
+      // Encrypt bid using real FHEVM Relayer
+      const relayer = await getRelayerClient();
+      const encBid = await relayer.encryptU32(bid);
+      
+      console.log("Encrypted bid:", {
+        encBid,
+        lenBid: encBid?.length,
+      });
+
+      // Validate ciphertext
+      if (!looksLikeCiphertext(encBid)) {
+        throw new Error("Encryption failed: not a valid FHE ciphertext");
+      }
+      
       const tx = await contract.placeBid(dealId, encBid);
       return await tx.wait();
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, instance]);
+  }, [contractAddress, getSigner, getRelayerClient]);
 
   const computeOutcome = useCallback(async (dealId: bigint) => {
     setBusy(true);
@@ -140,10 +255,7 @@ export function useBlindEscrowV2(contractAddress: string) {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
-        [
-          "function computeOutcome(uint256 id) external",
-          "event OutcomeComputed(uint256 indexed id)"
-        ],
+        BlindEscrowV2ABI,
         signer
       );
       
@@ -178,10 +290,7 @@ export function useBlindEscrowV2(contractAddress: string) {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
-        [
-          "function finalizeWithOracle(uint256 id, bool outcome, bytes calldata signature) external",
-          "event Finalized(uint256 indexed id, bool success)"
-        ],
+        BlindEscrowV2ABI,
         signer
       );
       
@@ -196,9 +305,7 @@ export function useBlindEscrowV2(contractAddress: string) {
     const signer = await getSigner();
     const contract = new ethers.Contract(
       contractAddress,
-      [
-        "function getDealPublic(uint256 id) external view returns (uint8 mode, uint8 state, address seller, address buyer, address token, uint256 amount, bool success)"
-      ],
+      BlindEscrowV2ABI,
       signer
     );
     
@@ -212,10 +319,7 @@ export function useBlindEscrowV2(contractAddress: string) {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
-        [
-          "function sellerCancelBeforeBid(uint256 id) external",
-          "event Canceled(uint256 indexed id)"
-        ],
+        BlindEscrowV2ABI,
         signer
       );
       

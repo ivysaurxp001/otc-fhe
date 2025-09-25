@@ -11,11 +11,23 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 // import { Loader2, CheckCircle, XCircle } from "lucide-react";
 
-// Mock ERC20 tokens for demo
-const MOCK_TOKENS = [
-  { address: "0x1234567890123456789012345678901234567890", symbol: "USDC", decimals: 6 },
-  { address: "0x2345678901234567890123456789012345678901", symbol: "USDT", decimals: 6 },
-  { address: "0x3456789012345678901234567890123456789012", symbol: "DAI", decimals: 18 },
+// ERC20 tokens from environment variables
+const TOKENS = [
+  { 
+    address: process.env.NEXT_PUBLIC_USDC_ADDRESS || "0x1234567890123456789012345678901234567890", 
+    symbol: "USDC", 
+    decimals: 6 
+  },
+  { 
+    address: process.env.NEXT_PUBLIC_USDT_ADDRESS || "0x2345678901234567890123456789012345678901", 
+    symbol: "USDT", 
+    decimals: 6 
+  },
+  { 
+    address: process.env.NEXT_PUBLIC_DAI_ADDRESS || "0x3456789012345678901234567890123456789012", 
+    symbol: "DAI", 
+    decimals: 18 
+  },
 ];
 
 interface DealState {
@@ -43,6 +55,9 @@ export default function BlindEscrowDemo() {
     getDealInfo 
   } = useBlindEscrowV2(contractAddress);
 
+  // Check if contract is deployed
+  const isContractDeployed = contractAddress !== "0x0000000000000000000000000000000000000000";
+
   const [deal, setDeal] = useState<DealState>({
     id: null,
     mode: 0,
@@ -65,10 +80,36 @@ export default function BlindEscrowDemo() {
   const handleCreateDeal = async () => {
     clearError();
     try {
+      // Validation
+      if (deal.mode !== 0 && deal.mode !== 1) {
+        throw new Error(`Invalid mode: ${deal.mode}. Must be 0 (P2P) or 1 (OPEN)`);
+      }
+      if (!deal.token || deal.token === "0x0000000000000000000000000000000000000000") {
+        throw new Error("Please select a valid token");
+      }
+      if (!deal.amount || parseFloat(deal.amount) <= 0) {
+        throw new Error("Please enter a valid amount");
+      }
+      if (deal.mode === 0 && (!deal.buyerOpt || deal.buyerOpt === "0x0000000000000000000000000000000000000000")) {
+        throw new Error("Please enter buyer address for P2P mode");
+      }
+      
+      console.log("Creating deal with params:", {
+        mode: deal.mode,
+        modeType: typeof deal.mode,
+        token: deal.token,
+        amount: deal.amount,
+        buyerOpt: deal.buyerOpt
+      });
+      
+      // Get token decimals
+      const selectedToken = TOKENS.find(t => t.address === deal.token);
+      const decimals = selectedToken?.decimals || 18;
+      
       const result = await createDeal(
         deal.mode,
         deal.token,
-        ethers.parseUnits(deal.amount, 18), // Assuming 18 decimals for demo
+        ethers.parseUnits(deal.amount, decimals).toString(), // Use correct decimals
         deal.buyerOpt || undefined
       );
       
@@ -76,8 +117,11 @@ export default function BlindEscrowDemo() {
       const event = result.logs.find((log: any) => log.topics[0] === ethers.id("DealCreated(uint256,uint8,address,address,address,uint256)"));
       if (event) {
         const dealId = BigInt(event.topics[1]);
+        console.log("Deal created successfully! Deal ID:", dealId.toString());
         setDeal(prev => ({ ...prev, id: dealId, currentStep: 2 }));
         setTxHash(result.hash);
+      } else {
+        console.error("DealCreated event not found in logs:", result.logs);
       }
     } catch (err: any) {
       setError(err.message || "Failed to create deal");
@@ -87,7 +131,14 @@ export default function BlindEscrowDemo() {
   // Step 2: Seller Submit
   const handleSellerSubmit = async () => {
     clearError();
-    if (!deal.id) return;
+    if (!deal.id) {
+      console.error("No deal ID available for seller submit");
+      setError("No deal ID available. Please create a deal first.");
+      return;
+    }
+    
+    console.log("Seller submit with deal ID:", deal.id.toString());
+    console.log("Ask:", deal.ask, "Threshold:", deal.threshold);
     
     try {
       await sellerSubmit(
@@ -97,6 +148,7 @@ export default function BlindEscrowDemo() {
       );
       setDeal(prev => ({ ...prev, currentStep: 3 }));
     } catch (err: any) {
+      console.error("Seller submit error:", err);
       setError(err.message || "Failed to submit seller data");
     }
   };
@@ -111,7 +163,7 @@ export default function BlindEscrowDemo() {
         deal.id,
         parseInt(deal.bid),
         deal.token,
-        ethers.parseUnits(deal.amount, 18)
+        ethers.parseUnits(deal.amount, 18).toString()
       );
       setDeal(prev => ({ ...prev, currentStep: 4 }));
     } catch (err: any) {
@@ -144,7 +196,7 @@ export default function BlindEscrowDemo() {
       
       // Fetch updated deal info
       const dealInfo = await getDealInfo(deal.id);
-      setDeal(prev => ({ ...prev, dealInfo }));
+      setDeal(prev => ({ ...prev, dealInfo: dealInfo }));
     } catch (err: any) {
       setError(err.message || "Failed to finalize with oracle");
     }
@@ -153,8 +205,8 @@ export default function BlindEscrowDemo() {
   // Fetch deal info when deal ID is available
   useEffect(() => {
     if (deal.id && deal.currentStep > 1) {
-      getDealInfo(deal.id).then(setDealInfo => {
-        setDeal(prev => ({ ...prev, dealInfo }));
+      getDealInfo(deal.id).then(dealInfo => {
+        setDeal(prev => ({ ...prev, dealInfo: dealInfo }));
       });
     }
   }, [deal.id, deal.currentStep, getDealInfo]);
@@ -184,6 +236,27 @@ export default function BlindEscrowDemo() {
           Giao dịch mù với Fully Homomorphic Encryption - Logic định giá được giữ kín
         </p>
       </div>
+
+      {!isContractDeployed && (
+        <Alert className="mb-6" variant="destructive">
+          <AlertDescription>
+            ❌ <strong>Contract chưa được deploy!</strong><br/>
+            Vui lòng deploy contract BlindEscrowV2 trước khi sử dụng.<br/>
+            Contract Address: <code className="text-sm">{contractAddress}</code>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {isContractDeployed && (
+        <Alert className="mb-6">
+          <AlertDescription>
+            ✅ <strong>Contract đã được deploy!</strong><br/>
+            Contract Address: <code className="text-sm">{contractAddress}</code><br/>
+            Oracle Address: <code className="text-sm">{process.env.NEXT_PUBLIC_ORACLE_ADDRESS}</code><br/>
+            Network: {process.env.NEXT_PUBLIC_NETWORK} (Chain ID: {process.env.NEXT_PUBLIC_CHAIN_ID})
+          </AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert className="mb-6" variant="destructive">
@@ -261,7 +334,7 @@ export default function BlindEscrowDemo() {
                     <SelectValue placeholder="Select token" />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_TOKENS.map((token) => (
+                    {TOKENS.map((token) => (
                       <SelectItem key={token.address} value={token.address}>
                         {token.symbol}
                       </SelectItem>
@@ -479,7 +552,17 @@ export default function BlindEscrowDemo() {
                   </div>
                 </div>
               ) : (
-                <p className="text-gray-500">No deal information available</p>
+                <div className="space-y-3">
+                  <p className="text-gray-500">No deal information available</p>
+                  <div className="text-xs text-gray-400">
+                    <div><strong>Available Tokens:</strong></div>
+                    {TOKENS.map((token) => (
+                      <div key={token.address} className="ml-2">
+                        {token.symbol}: <code className="text-xs">{token.address}</code>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>
