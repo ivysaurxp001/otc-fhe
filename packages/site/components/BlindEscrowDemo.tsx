@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, CheckCircle, XCircle } from "lucide-react";
+// import { Loader2, CheckCircle, XCircle } from "lucide-react";
 
 // Mock ERC20 tokens for demo
 const MOCK_TOKENS = [
@@ -38,7 +38,8 @@ export default function BlindEscrowDemo() {
     createDeal, 
     sellerSubmit, 
     placeBid, 
-    revealAndSettle,
+    computeOutcome,
+    finalizeWithOracle,
     getDealInfo 
   } = useBlindEscrowV2(contractAddress);
 
@@ -118,20 +119,34 @@ export default function BlindEscrowDemo() {
     }
   };
 
-  // Step 4: Reveal and Settle
-  const handleRevealAndSettle = async () => {
+  // Step 4: Compute Outcome
+  const handleComputeOutcome = async () => {
     clearError();
     if (!deal.id) return;
     
     try {
-      const result = await revealAndSettle(deal.id);
+      const result = await computeOutcome(deal.id);
+      setTxHash(result.hash);
+      setDeal(prev => ({ ...prev, currentStep: 5 }));
+    } catch (err: any) {
+      setError(err.message || "Failed to compute outcome");
+    }
+  };
+
+  // Step 5: Finalize with Oracle
+  const handleFinalizeWithOracle = async () => {
+    clearError();
+    if (!deal.id) return;
+    
+    try {
+      const result = await finalizeWithOracle(deal.id);
       setTxHash(result.hash);
       
       // Fetch updated deal info
       const dealInfo = await getDealInfo(deal.id);
       setDeal(prev => ({ ...prev, dealInfo }));
     } catch (err: any) {
-      setError(err.message || "Failed to reveal and settle");
+      setError(err.message || "Failed to finalize with oracle");
     }
   };
 
@@ -172,16 +187,14 @@ export default function BlindEscrowDemo() {
 
       {error && (
         <Alert className="mb-6" variant="destructive">
-          <XCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>❌ {error}</AlertDescription>
         </Alert>
       )}
 
       {txHash && (
         <Alert className="mb-6">
-          <CheckCircle className="h-4 w-4" />
           <AlertDescription>
-            Transaction: <code className="text-sm">{txHash}</code>
+            ✅ Transaction: <code className="text-sm">{txHash}</code>
           </AlertDescription>
         </Alert>
       )}
@@ -189,7 +202,7 @@ export default function BlindEscrowDemo() {
       {/* Progress Indicator */}
       <div className="mb-8">
         <div className="flex items-center justify-between">
-          {[1, 2, 3, 4].map((step) => (
+          {[1, 2, 3, 4, 5].map((step) => (
             <div key={step} className="flex flex-col items-center">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${
                 step <= deal.currentStep 
@@ -202,7 +215,8 @@ export default function BlindEscrowDemo() {
                 {step === 1 && "Create Deal"}
                 {step === 2 && "Seller Submit"}
                 {step === 3 && "Place Bid"}
-                {step === 4 && "Reveal & Settle"}
+                {step === 4 && "Compute Outcome"}
+                {step === 5 && "Oracle Finalize"}
               </span>
             </div>
           ))}
@@ -284,7 +298,7 @@ export default function BlindEscrowDemo() {
                 disabled={busy || !deal.token || !deal.amount || (deal.mode === 0 && !deal.buyerOpt)}
                 className="w-full"
               >
-                {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {busy && <span className="mr-2">⏳</span>}
                 Create Deal
               </Button>
             </CardContent>
@@ -333,7 +347,7 @@ export default function BlindEscrowDemo() {
                   disabled={busy || !deal.ask || !deal.threshold}
                   className="w-full"
                 >
-                  {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {busy && <span className="mr-2">⏳</span>}
                   Submit Encrypted Data
                 </Button>
               </CardContent>
@@ -369,20 +383,20 @@ export default function BlindEscrowDemo() {
                   disabled={busy || !deal.bid}
                   className="w-full"
                 >
-                  {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {busy && <span className="mr-2">⏳</span>}
                   Place Bid & Escrow
                 </Button>
               </CardContent>
             </Card>
           )}
 
-          {/* Step 4: Reveal and Settle */}
+          {/* Step 4: Compute Outcome */}
           {deal.currentStep >= 4 && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <span className="text-blue-500">4.</span>
-                  Reveal & Settle
+                  Compute Outcome
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -391,12 +405,38 @@ export default function BlindEscrowDemo() {
                 </p>
 
                 <Button 
-                  onClick={handleRevealAndSettle} 
+                  onClick={handleComputeOutcome} 
                   disabled={busy}
                   className="w-full"
                 >
-                  {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Reveal & Settle
+                  {busy && <span className="mr-2">⏳</span>}
+                  Compute Outcome
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Step 5: Oracle Finalize */}
+          {deal.currentStep >= 5 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <span className="text-blue-500">5.</span>
+                  Oracle Finalize
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <p className="text-sm text-gray-600">
+                  Oracle sẽ decrypt kết quả và ký signature
+                </p>
+
+                <Button 
+                  onClick={handleFinalizeWithOracle} 
+                  disabled={busy}
+                  className="w-full"
+                >
+                  {busy && <span className="mr-2">⏳</span>}
+                  Finalize with Oracle
                 </Button>
               </CardContent>
             </Card>
@@ -464,8 +504,11 @@ export default function BlindEscrowDemo() {
               </div>
 
               <div className="bg-gray-50 p-3 rounded text-sm font-mono">
-                <div className="text-gray-600 mb-2">Result:</div>
-                <div>bool outcome = FHE.decrypt(success)</div>
+                <div className="text-gray-600 mb-2">Oracle Pattern:</div>
+                <div>1. FHE.computeOutcome() → encOutcome</div>
+                <div>2. Oracle decrypts encOutcome</div>
+                <div>3. Oracle signs outcome</div>
+                <div>4. finalizeWithOracle(outcome, signature)</div>
                 <div className="text-xs text-gray-500 mt-1">
                   Only the boolean outcome is revealed publicly
                 </div>

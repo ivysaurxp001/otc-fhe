@@ -1,6 +1,5 @@
 import { useCallback, useState } from "react";
 import { ethers } from "ethers";
-import { useFhevm } from "fhevm-react";
 
 type Mode = 0 | 1; // 0=P2P, 1=OPEN
 
@@ -16,7 +15,14 @@ interface DealInfo {
 
 export function useBlindEscrowV2(contractAddress: string) {
   const [busy, setBusy] = useState(false);
-  const { instance } = useFhevm();
+  
+  // Mock FHEVM instance for demo
+  const instance = {
+    encrypt32: async (value: number) => {
+      // Mock encryption - in real app, this would use FHEVM SDK
+      return `0x${value.toString(16).padStart(64, '0')}`;
+    }
+  };
 
   const getSigner = useCallback(async () => {
     if (!window.ethereum) {
@@ -128,22 +134,58 @@ export function useBlindEscrowV2(contractAddress: string) {
     }
   }, [contractAddress, getSigner, instance]);
 
-  const revealAndSettle = useCallback(async (dealId: bigint) => {
+  const computeOutcome = useCallback(async (dealId: bigint) => {
     setBusy(true);
     try {
       const signer = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
         [
-          "function revealAndSettle(uint256 id) external",
-          "event Revealed(uint256 indexed id, bool success)",
-          "event Settled(uint256 indexed id, address indexed seller, uint256 amount)",
-          "event Refunded(uint256 indexed id, address indexed buyer, uint256 amount)"
+          "function computeOutcome(uint256 id) external",
+          "event OutcomeComputed(uint256 indexed id)"
         ],
         signer
       );
       
-      const tx = await contract.revealAndSettle(dealId);
+      const tx = await contract.computeOutcome(dealId);
+      return await tx.wait();
+    } finally { 
+      setBusy(false); 
+    }
+  }, [contractAddress, getSigner]);
+
+  const finalizeWithOracle = useCallback(async (dealId: bigint) => {
+    setBusy(true);
+    try {
+      // Call Next.js API route for oracle signature
+      const response = await fetch('/api/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract: contractAddress,
+          chainId: Number(process.env.NEXT_PUBLIC_CHAIN_ID),
+          dealId: dealId.toString()
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Oracle request failed');
+      }
+      
+      const { outcome, signature } = await response.json();
+      
+      const signer = await getSigner();
+      const contract = new ethers.Contract(
+        contractAddress,
+        [
+          "function finalizeWithOracle(uint256 id, bool outcome, bytes calldata signature) external",
+          "event Finalized(uint256 indexed id, bool success)"
+        ],
+        signer
+      );
+      
+      const tx = await contract.finalizeWithOracle(dealId, outcome, signature);
       return await tx.wait();
     } finally { 
       setBusy(false); 
@@ -189,7 +231,8 @@ export function useBlindEscrowV2(contractAddress: string) {
     createDeal, 
     sellerSubmit, 
     placeBid, 
-    revealAndSettle,
+    computeOutcome,
+    finalizeWithOracle,
     getDealInfo,
     sellerCancelBeforeBid
   };

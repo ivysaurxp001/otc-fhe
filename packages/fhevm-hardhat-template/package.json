@@ -24,9 +24,14 @@
     "hardhat"
   ],
   "dependencies": {
-    "encrypted-types": "^0.0.4",
     "@fhevm/solidity": "^0.8.0",
-    "@zama-fhe/oracle-solidity": "^0.1.0"
+    "@openzeppelin/contracts": "^5.0.0",
+    "@zama-fhe/oracle-solidity": "^0.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "encrypted-types": "^0.0.4",
+    "express": "^5.1.0",
+    "nodemon": "^3.1.10"
   },
   "devDependencies": {
     "@fhevm/hardhat-plugin": "^0.1.0",

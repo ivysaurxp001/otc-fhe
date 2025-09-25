@@ -4,64 +4,69 @@ pragma solidity ^0.8.24;
 import "@fhevm/solidity/lib/FHE.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * BlindEscrowV2 — Flow gọn (Cách 1: amount là PUBLIC)
- * - ask/bid/threshold giữ kín bằng FHE (euint32). So sánh trên ciphertext -> ebool.
- * - Lộ tối thiểu: chỉ boolean outcome (match/không) bị lộ lúc settle.
- * - Nếu match: chuyển amount (PUBLIC) đã escrow từ buyer sang seller; nếu không: refund buyer.
- *
- * Ghi chú:
- * - Để contract có quyền decrypt boolean outcome, cần gọi FHE.allowThis(...) khi lưu các ciphertext.
- * - Code này dùng FHE.decrypt(ebool) để quyết định đường đi (payout/refund).
+ * BlindEscrowV2_Oracle — amount PUBLIC + FHE outcome (encrypted)
+ * - ask/bid/threshold: euint32 (ciphertext)
+ * - on-chain compute: ebool encOutcome = (bid <= ask) && (ask <= threshold)  (vẫn kín)
+ * - oracleSigner được cấp quyền user-decrypt encOutcome để lấy plaintext boolean
+ * - oracle ký outcome và gửi vào finalizeWithOracle(...) => chuyển tiền theo amount public
  */
-contract BlindEscrowV2 is Ownable, ReentrancyGuard {
+contract BlindEscrowV2_Oracle is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum DealMode { P2P, OPEN }
-    enum DealState { None, Created, A_Submitted, Ready, Settled, Canceled }
+    enum DealState { None, Created, A_Submitted, Ready, OutcomeComputed, Settled, Canceled }
 
     struct Deal {
         DealMode mode;
         DealState state;
 
         address seller;
-        address buyer;           // Với OPEN: sẽ khóa buyer khi bid đầu tiên
+        address buyer;
 
-        address paymentToken;    // ERC20 dùng thanh toán
-        uint256 amount;          // PUBLIC: số tiền thanh toán
+        address paymentToken;
+        uint256 amount;        // PUBLIC
 
-        euint32 encAsk;          // ciphertext
-        euint32 encThreshold;    // ciphertext
-        euint32 encBid;          // ciphertext
+        euint32 encAsk;
+        euint32 encThreshold;
+        euint32 encBid;
 
-        bool success;            // outcome public sau reveal
+        ebool   encOutcome;    // encrypted boolean outcome (computed on-chain)
+        bool    success;       // plaintext outcome set on finalize
     }
 
     uint256 public nextId;
     mapping(uint256 => Deal) public deals;
 
+    /// Address dùng để ký outcome (serverless oracle)
+    address public oracleSigner;
+
     event DealCreated(uint256 indexed id, DealMode mode, address indexed seller, address indexed buyerOpt, address token, uint256 amount);
     event SellerSubmitted(uint256 indexed id);
     event BidPlaced(uint256 indexed id, address indexed buyer);
-    event Revealed(uint256 indexed id, bool success);
+    event OutcomeComputed(uint256 indexed id);
+    event Finalized(uint256 indexed id, bool success);
     event Settled(uint256 indexed id, address indexed seller, uint256 amount);
     event Refunded(uint256 indexed id, address indexed buyer, uint256 amount);
     event Canceled(uint256 indexed id);
 
-    // ===== Views (tiện debug) =====
-    function version() external pure returns (string memory) { return "BlindEscrowV2:amount-public"; }
+    constructor(address initialOwner, address _oracleSigner) Ownable(initialOwner) {
+        require(_oracleSigner != address(0), "oracle=0");
+        oracleSigner = _oracleSigner;
+    }
 
-    // ===== Core flow =====
+    function setOracleSigner(address s) external onlyOwner {
+        require(s != address(0), "oracle=0");
+        oracleSigner = s;
+    }
 
-    /**
-     * @param mode       P2P (buyer phải chỉ định trước) hoặc OPEN (ai bid trước sẽ thành buyer)
-     * @param paymentToken ErC20 thanh toán
-     * @param amount     Số tiền PUBLIC
-     * @param buyerOpt   Bắt buộc khác 0x0 nếu mode=P2P; =0x0 nếu OPEN
-     */
+    function version() external pure returns (string memory) { return "BlindEscrowV2_Oracle+EncOutcome"; }
+
+    // ----- Core flow -----
+
     function createDeal(
         DealMode mode,
         address paymentToken,
@@ -81,22 +86,18 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
         d.mode = mode;
         d.state = DealState.Created;
         d.seller = msg.sender;
-        d.buyer = buyerOpt; // nếu P2P
+        d.buyer = buyerOpt;
         d.paymentToken = paymentToken;
         d.amount = amount;
 
         emit DealCreated(id, mode, msg.sender, buyerOpt, paymentToken, amount);
     }
 
-    /**
-     * Seller gửi ask + threshold (ciphertext). Cấp quyền cho contract dùng để tính outcome.
-     */
     function sellerSubmit(uint256 id, euint32 encAsk, euint32 encThreshold) external {
         Deal storage d = deals[id];
         require(d.state == DealState.Created, "bad state");
         require(msg.sender == d.seller, "not seller");
 
-        // Cho phép contract dùng các ciphertext này để tính & decrypt ebool kết quả
         FHE.allowThis(encAsk);
         FHE.allowThis(encThreshold);
 
@@ -107,13 +108,9 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
         emit SellerSubmitted(id);
     }
 
-    /**
-     * Buyer đặt bid (ciphertext) và ESCROW amount (PUBLIC) vào contract.
-     * Với OPEN: buyer đầu tiên sẽ bị khóa.
-     */
     function placeBid(uint256 id, euint32 encBid) external nonReentrant {
         Deal storage d = deals[id];
-        require(d.state == DealState.A_Submitted, "bad state");
+        require(d.state == DealState.A_Submitted, "bad state A");
         if (d.mode == DealMode.P2P) {
             require(msg.sender == d.buyer, "buyer fixed");
         } else {
@@ -121,43 +118,55 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
             d.buyer = msg.sender;
         }
 
-        // Contract cần quyền với encBid để tính outcome
         FHE.allowThis(encBid);
         d.encBid = encBid;
 
-        // ESCROW: chuyển amount PUBLIC từ buyer vào contract
+        // ESCROW amount PUBLIC vào contract
         IERC20(d.paymentToken).safeTransferFrom(msg.sender, address(this), d.amount);
 
         d.state = DealState.Ready;
         emit BidPlaced(id, d.buyer);
     }
 
-    /**
-     * So sánh kín bằng FHE -> decrypt ebool outcome -> nếu true: trả seller, nếu false: refund buyer.
-     * Ví dụ điều kiện: bid <= ask && ask <= threshold
-     */
-    function revealAndSettle(uint256 id) external nonReentrant {
+    /// Tính outcome (encrypted) trên chuỗi và CẤP QUYỀN user-decrypt cho oracleSigner
+    function computeOutcome(uint256 id) external {
         Deal storage d = deals[id];
-        require(d.state == DealState.Ready, "bad state");
-        require(d.buyer != address(0) && d.seller != address(0), "parties not set");
+        require(d.state == DealState.Ready, "bad state R");
 
-        // Lấy ciphertext
-        euint32 eAsk = d.encAsk;
-        euint32 eThr = d.encThreshold;
-        euint32 eBid = d.encBid;
-
-        // FHE compare
-        ebool ok1 = FHE.le(eBid, eAsk); // bid <= ask
-        ebool ok2 = FHE.le(eAsk, eThr); // ask <= threshold
+        // ebool = (bid <= ask) && (ask <= threshold)
+        ebool ok1 = FHE.le(d.encBid, d.encAsk);
+        ebool ok2 = FHE.le(d.encAsk, d.encThreshold);
         ebool eSuccess = FHE.and(ok1, ok2);
 
-        // Decrypt boolean outcome (contract được phép vì đã allowThis ở trên)
-        bool success = FHE.decrypt(eSuccess);
+        // Lưu encOutcome để oracle có thể yêu cầu decrypt qua SDK
+        d.encOutcome = eSuccess;
 
-        d.success = success;
-        emit Revealed(id, success);
+        // Cấp quyền user-decrypt cho oracleSigner (chỉ outcome, không lộ inputs)
+        FHE.allow(eSuccess, oracleSigner);
 
-        if (success) {
+        d.state = DealState.OutcomeComputed;
+        emit OutcomeComputed(id);
+    }
+
+    /// Oracle ký outcome plaintext (obtained via user-decrypt) và gửi vào đây để finalize & chuyển tiền
+    function finalizeWithOracle(
+        uint256 id,
+        bool outcome,
+        bytes calldata signature
+    ) external nonReentrant {
+        Deal storage d = deals[id];
+        require(d.state == DealState.OutcomeComputed, "bad state OC");
+        require(d.seller != address(0) && d.buyer != address(0), "parties not set");
+
+        // Verify signature
+        bytes32 digest = _finalizeDigest(address(this), block.chainid, id, outcome);
+        address rec = _recover(digest, signature);
+        require(rec == oracleSigner, "bad oracle sig");
+
+        d.success = outcome;
+        emit Finalized(id, outcome);
+
+        if (outcome) {
             IERC20(d.paymentToken).safeTransfer(d.seller, d.amount);
             d.state = DealState.Settled;
             emit Settled(id, d.seller, d.amount);
@@ -168,9 +177,6 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
         }
     }
 
-    /**
-     * Seller hủy trước khi có bid.
-     */
     function sellerCancelBeforeBid(uint256 id) external {
         Deal storage d = deals[id];
         require(d.state == DealState.Created || d.state == DealState.A_Submitted, "cannot cancel");
@@ -179,7 +185,7 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
         emit Canceled(id);
     }
 
-    // ===== tiện ích / view =====
+    // ----- Views -----
 
     function getDealPublic(
         uint256 id
@@ -193,12 +199,27 @@ contract BlindEscrowV2 is Ownable, ReentrancyGuard {
         return (d.mode, d.state, d.seller, d.buyer, d.paymentToken, d.amount, d.success);
     }
 
-    function getDealState(uint256 id) external view returns (DealState) {
-        return deals[id].state;
-    }
-
-    // Emergency: rút token lỡ kẹt (onlyOwner)
+    // ----- Admin / Utils -----
     function emergencyWithdraw(address token, uint256 amount) external onlyOwner {
         IERC20(token).safeTransfer(owner(), amount);
+    }
+
+    // EIP-191 light signing
+    function _finalizeDigest(address _this, uint256 _chainId, uint256 _dealId, bool _outcome) internal pure returns (bytes32) {
+        bytes32 inner = keccak256(abi.encode(_this, _chainId, _dealId, _outcome));
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", inner));
+    }
+
+    function _recover(bytes32 digest, bytes memory sig) internal pure returns (address) {
+        require(sig.length == 65, "sig len");
+        bytes32 r; bytes32 s; uint8 v;
+        assembly {
+            r := mload(add(sig, 0x20))
+            s := mload(add(sig, 0x40))
+            v := byte(0, mload(add(sig, 0x60)))
+        }
+        if (v < 27) v += 27;
+        require(v == 27 || v == 28, "bad v");
+        return ecrecover(digest, v, r, s);
     }
 }

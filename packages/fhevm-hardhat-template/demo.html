@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FHEVM BlindEscrow Oracle Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        button { padding: 10px 20px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        input, textarea { width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
+        .result { background: #f8f9fa; padding: 10px; border-radius: 4px; margin: 10px 0; }
+        .error { background: #f8d7da; color: #721c24; }
+        .success { background: #d4edda; color: #155724; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 FHEVM BlindEscrow Oracle Demo</h1>
+        
+        <div class="section">
+            <h2>📋 Contract Info</h2>
+            <p><strong>Contract Address:</strong> <code>0x40e8bAb048C3a37Ab4d03c99D860CCDC88D06dD7</code></p>
+            <p><strong>Oracle Address:</strong> <code>0x963a2d0BE2eb5d785C6E73ec904fcE8d65691773</code></p>
+            <p><strong>Relayer URL:</strong> <code>http://localhost:3001</code></p>
+        </div>
+
+        <div class="section">
+            <h2>🔗 Connect Wallet</h2>
+            <p><strong>Prerequisites:</strong></p>
+            <ul>
+                <li>Install <a href="https://metamask.io/" target="_blank">MetaMask</a> browser extension</li>
+                <li>Switch to <strong>Sepolia Testnet</strong> network</li>
+                <li>Have some Sepolia ETH for gas fees</li>
+            </ul>
+            <button onclick="connectWallet()">Connect MetaMask</button>
+            <div id="walletInfo" class="result" style="display: none;"></div>
+        </div>
+
+        <div class="section">
+            <h2>🧪 Test Relayer</h2>
+            <button onclick="testHealth()">Test Health</button>
+            <button onclick="testFinalize()">Test Finalize</button>
+            <div id="relayerResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>📝 Create Deal</h2>
+            <input type="number" id="dealAmount" placeholder="Amount (wei)" value="1000000000000000000">
+            <input type="text" id="paymentToken" placeholder="Payment Token Address" value="0x0000000000000000000000000000000000000000">
+            <button onclick="createDeal()">Create Deal</button>
+            <div id="dealResult" class="result"></div>
+        </div>
+
+        <div class="section">
+            <h2>🎯 Finalize Deal</h2>
+            <input type="number" id="finalizeDealId" placeholder="Deal ID" value="1">
+            <button onclick="finalizeDeal()">Finalize Deal</button>
+            <div id="finalizeResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        let provider, signer, contract;
+        const CONTRACT_ADDRESS = "0x40e8bAb048C3a37Ab4d03c99D860CCDC88D06dD7";
+        const RELAYER_URL = "http://localhost:3001";
+
+        // Contract ABI (updated to match new contract)
+        const CONTRACT_ABI = [
+            "function createDeal(uint8 mode, address paymentToken, uint256 amount, address buyerOpt) external returns (uint256)",
+            "function sellerSubmit(uint256 id, bytes calldata encAsk, bytes calldata encThreshold) external",
+            "function placeBid(uint256 id, bytes calldata encBid) external",
+            "function computeOutcome(uint256 id) external",
+            "function finalizeWithOracle(uint256 dealId, bool success, bytes calldata signature) external",
+            "function getDealPublic(uint256 id) view returns (uint8 mode, uint8 state, address seller, address buyer, address token, uint256 amount, bool success)",
+            "event DealCreated(uint256 indexed id, uint8 mode, address indexed seller, address indexed buyerOpt, address token, uint256 amount)",
+            "event SellerSubmitted(uint256 indexed id)",
+            "event BidPlaced(uint256 indexed id, address indexed buyer)",
+            "event OutcomeComputed(uint256 indexed id)",
+            "event Finalized(uint256 indexed id, bool success)"
+        ];
+
+        async function connectWallet() {
+            try {
+                // Check if MetaMask is installed
+                if (typeof window.ethereum === 'undefined') {
+                    throw new Error('MetaMask not found. Please install MetaMask extension.');
+                }
+
+                // Check if MetaMask is locked
+                const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                if (accounts.length === 0) {
+                    throw new Error('MetaMask is locked. Please unlock your wallet.');
+                }
+
+                provider = new ethers.providers.Web3Provider(window.ethereum);
+                
+                // Request account access
+                await provider.send("eth_requestAccounts", []);
+                signer = provider.getSigner();
+                const address = await signer.getAddress();
+                
+                // Check network
+                const network = await provider.getNetwork();
+                if (network.chainId !== 11155111) {
+                    throw new Error('Please switch to Sepolia network (Chain ID: 11155111)');
+                }
+                
+                contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+                
+                document.getElementById('walletInfo').innerHTML = `
+                    <div class="success">
+                        <strong>✅ Connected!</strong><br>
+                        Address: ${address}<br>
+                        Network: ${network.name} (${network.chainId})
+                    </div>
+                `;
+                document.getElementById('walletInfo').style.display = 'block';
+            } catch (error) {
+                document.getElementById('walletInfo').innerHTML = `
+                    <div class="error">
+                        <strong>❌ Error:</strong> ${error.message}
+                    </div>
+                `;
+                document.getElementById('walletInfo').style.display = 'block';
+            }
+        }
+
+        async function testHealth() {
+            try {
+                const response = await fetch(`${RELAYER_URL}/health`);
+                const data = await response.json();
+                
+                document.getElementById('relayerResult').innerHTML = `
+                    <div class="success">
+                        <strong>✅ Health Check:</strong><br>
+                        Status: ${data.status}<br>
+                        Oracle: ${data.oracleAddress}
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('relayerResult').innerHTML = `
+                    <div class="error">
+                        <strong>❌ Health Check Failed:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function testFinalize() {
+            try {
+                const response = await fetch(`${RELAYER_URL}/finalize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dealId: 1,
+                        contractAddress: CONTRACT_ADDRESS
+                    })
+                });
+                const data = await response.json();
+                
+                document.getElementById('relayerResult').innerHTML = `
+                    <div class="success">
+                        <strong>✅ Finalize Test:</strong><br>
+                        Success: ${data.success}<br>
+                        Signature: ${data.signature.substring(0, 20)}...<br>
+                        Deal ID: ${data.dealId}
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('relayerResult').innerHTML = `
+                    <div class="error">
+                        <strong>❌ Finalize Test Failed:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function createDeal() {
+            if (!contract) {
+                alert('Please connect wallet first');
+                return;
+            }
+
+            try {
+                const amount = document.getElementById('dealAmount').value;
+                const paymentToken = document.getElementById('paymentToken').value;
+                
+                const tx = await contract.createDeal(
+                    0, // P2P mode
+                    paymentToken,
+                    amount,
+                    ethers.constants.AddressZero // No specific buyer
+                );
+                
+                const receipt = await tx.wait();
+                
+                // Parse event để lấy dealId
+                const event = receipt.logs.find(log => {
+                    try {
+                        const parsed = contract.interface.parseLog(log);
+                        return parsed.name === 'DealCreated';
+                    } catch {
+                        return false;
+                    }
+                });
+
+                if (!event) throw new Error('DealCreated event not found');
+                
+                const parsed = contract.interface.parseLog(event);
+                const dealId = parsed.args.id;
+                
+                document.getElementById('dealResult').innerHTML = `
+                    <div class="success">
+                        <strong>✅ Deal Created!</strong><br>
+                        Deal ID: ${dealId}<br>
+                        Transaction: ${tx.hash}<br>
+                        <a href="https://sepolia.etherscan.io/tx/${tx.hash}" target="_blank">View on Etherscan</a>
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('dealResult').innerHTML = `
+                    <div class="error">
+                        <strong>❌ Create Deal Failed:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function finalizeDeal() {
+            if (!contract) {
+                alert('Please connect wallet first');
+                return;
+            }
+
+            try {
+                const dealId = document.getElementById('finalizeDealId').value;
+                
+                // Call relayer to get signature
+                const response = await fetch(`${RELAYER_URL}/finalize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dealId: parseInt(dealId),
+                        contractAddress: CONTRACT_ADDRESS
+                    })
+                });
+                const data = await response.json();
+                
+                // Call contract finalizeWithOracle
+                const tx = await contract.finalizeWithOracle(
+                    data.dealId,
+                    data.success,
+                    data.signature
+                );
+                
+                document.getElementById('finalizeResult').innerHTML = `
+                    <div class="success">
+                        <strong>✅ Deal Finalized!</strong><br>
+                        Success: ${data.success}<br>
+                        Transaction: ${tx.hash}<br>
+                        <a href="https://sepolia.etherscan.io/tx/${tx.hash}" target="_blank">View on Etherscan</a>
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('finalizeResult').innerHTML = `
+                    <div class="error">
+                        <strong>❌ Finalize Failed:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>

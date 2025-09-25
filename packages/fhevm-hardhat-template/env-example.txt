@@ -1,0 +1,10 @@
+# Frontend (.env.local)
+NEXT_PUBLIC_CHAIN_ID=11155111
+NEXT_PUBLIC_CONTRACT_ADDRESS=0x40e8bAb048C3a37Ab4d03c99D860CCDC88D06dD7
+NEXT_PUBLIC_RPC_URL=https://sepolia.infura.io/v3/9da1f96d3ca24c4e81089a685509cb4b
+NEXT_PUBLIC_RELAYER_URL=https://your-relayer-url.com
+
+# Vercel Environment Variables (Project → Settings → Environment Variables)
+ORACLE_PK=0x_your_oracle_private_key_here
+RPC_URL=https://sepolia.infura.io/v3/9da1f96d3ca24c4e81089a685509cb4b
+RELAYER_URL=https://your-relayer-url.com
