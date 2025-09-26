@@ -44,7 +44,9 @@ interface DealState {
 }
 
 export default function BlindEscrowDemo() {
-  const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
+  const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x40e8bAb048C3a37Ab4d03c99D860CCDC88D06dD7";
+  
+  console.log("Contract address in component:", contractAddress);
   const { 
     busy, 
     isFhevmReady,

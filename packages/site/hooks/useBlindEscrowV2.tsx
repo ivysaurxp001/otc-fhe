@@ -1,8 +1,9 @@
 import { useCallback, useState, useEffect } from "react";
-import { ethers } from "ethers";
+import { ethers, Interface } from "ethers";
 import { BlindEscrowV2ABI } from "../abi/BlindEscrowV2ABI";
 import { useFhevm } from "@fhevm/react";
 import { useMetaMaskEthersSigner } from "./metamask/useMetaMaskEthersSigner";
+// Removed RelayerClient import - not available in client-side
 
 type Mode = 0 | 1; // 0=P2P, 1=OPEN
 
@@ -35,7 +36,7 @@ export function useBlindEscrowV2(contractAddress: string) {
   
   // FHEVM readiness state
   const isFhevmReady = !!instance && status === 'ready';
-  
+
   const getSigner = useCallback(async () => {
     if (!provider) {
       throw new Error("Provider not available");
@@ -113,15 +114,18 @@ export function useBlindEscrowV2(contractAddress: string) {
   ) => {
     setBusy(true);
     try {
-      const signer = await getSigner();
+      const dealIdNum = BigInt(dealId);                      // ✅ đảm bảo là BigInt
+      const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS!;
+      const sellerSigner = await getSigner();
       const contract = new ethers.Contract(
         contractAddress,
         BlindEscrowV2ABI,
-        signer
+        sellerSigner
       );
+      const sellerAddr = await sellerSigner.getAddress();
 
       console.log("SellerSubmit parameters:", {
-        dealId: dealId.toString(),
+        dealId: dealIdNum.toString(),
         ask,
         threshold
       });
@@ -137,7 +141,7 @@ export function useBlindEscrowV2(contractAddress: string) {
 
       // Check deal state first
       try {
-        const dealInfo = await contract.getDealPublic(dealId);
+        const dealInfo = await contract.getDealPublic(dealIdNum);
         console.log("Deal info before submit:", {
           mode: dealInfo[0].toString(),
           state: dealInfo[1].toString(),
@@ -157,63 +161,58 @@ export function useBlindEscrowV2(contractAddress: string) {
         }
         
         // Check if caller is the seller
-        const signerAddress = await signer.getAddress();
-        if (dealInfo[2].toLowerCase() !== signerAddress.toLowerCase()) {
-          throw new Error(`Caller ${signerAddress} is not the seller ${dealInfo[2]}`);
+        if (dealInfo[2].toLowerCase() !== sellerAddr.toLowerCase()) {
+          throw new Error(`Caller ${sellerAddr} is not the seller ${dealInfo[2]}`);
         }
       } catch (error) {
         console.error("Deal validation error:", error);
         throw error;
       }
 
-      // Encrypt values using FHEVM instance
+      // ✅ Sử dụng FHEVM instance (client-side pattern)
       if (!instance) {
         throw new Error(`FHEVM instance not available. Status: ${status}, Provider: ${!!provider}, ChainId: ${chainId}`);
       }
-      
-      const sellerSigner = await getSigner();
-      const inputAsk = instance.createEncryptedInput(contractAddress, sellerSigner.address);
-      inputAsk.add32(ask);
-      const encAskResult = await inputAsk.encrypt();
-      
-      const inputThreshold = instance.createEncryptedInput(contractAddress, sellerSigner.address);
-      inputThreshold.add32(threshold);
-      const encThresholdResult = await inputThreshold.encrypt();
-      
-      // Convert FHEVM result to string format expected by contract
-      const encAsk = `0x${Buffer.from(encAskResult.inputProof).toString('hex')}`;
-      const encThreshold = `0x${Buffer.from(encThresholdResult.inputProof).toString('hex')}`;
-      
-      console.log("Encrypted values:", {
-        encAsk,
-        encThreshold,
-        lenAsk: encAsk?.length,
-        lenThr: encThreshold?.length,
-      });
 
-      // Validate ciphertexts
-      if (!looksLikeCiphertext(encAsk) || !looksLikeCiphertext(encThreshold)) {
-        throw new Error("Encryption failed: not a valid FHE ciphertext");
-      }
+      // ✅ Kiểm tra selector để chắc chữ ký đúng
+      const iface = new Interface([
+        "function sellerSubmit(uint256 id, euint32 encAsk, euint32 encThreshold)"
+      ]);
+      console.log("[CHK] selector", iface.getFunction("sellerSubmit")!.selector); // 0x9c135429
+
+      // ✅ TẠO HANDLE BẰNG FHEVM instance với đúng pattern
+      const enc = await instance.createEncryptedInput(contractAddress, sellerAddr);
+      enc.add32(ask);        // euint32 #1
+      enc.add32(threshold);  // euint32 #2
       
-      // Try static call first to see the exact error
-      try {
-        await contract.sellerSubmit.staticCall(dealId, encAsk, encThreshold);
-        console.log("Static call successful, proceeding with transaction...");
-      } catch (staticError) {
-        console.error("Static call failed:", staticError);
-        throw staticError;
-      }
+      const encResult = await enc.encrypt();
       
-      const tx = await contract.sellerSubmit(dealId, encAsk, encThreshold);
-      return await tx.wait();
+      const encAskHandle = `0x${Buffer.from(encResult.handles[0]).toString('hex')}`;
+      const encThrHandle = `0x${Buffer.from(encResult.handles[1]).toString('hex')}`;
+
+      console.log("[CHK] handles len", encAskHandle.length, encThrHandle.length); // ~66,66
+
+      // ✅ GỌI BẰNG sellerSigner (đúng vai trò)
+      // (Optional) Thử static trước: nếu pass thì send tx
+      await (contract as any).connect(sellerSigner).callStatic.sellerSubmit(
+        dealIdNum,
+        encAskHandle,
+        encThrHandle
+      );
+
+      const tx = await (contract as any).connect(sellerSigner).sellerSubmit(
+        dealIdNum,
+        encAskHandle,
+        encThrHandle
+      );
+      await tx.wait();
     } catch (error: any) {
       console.error("SellerSubmit error:", error);
       throw error;
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, instance]);
+  }, [getSigner, instance, status, provider, chainId]);
 
   const placeBid = useCallback(async (
     dealId: bigint, 
@@ -223,8 +222,9 @@ export function useBlindEscrowV2(contractAddress: string) {
   ) => {
     setBusy(true);
     try {
+      const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS!;
       const buyerSigner = await getSigner();
-      const userAddress = await buyerSigner.getAddress();
+      const buyerAddr = await buyerSigner.getAddress();
       
       // ERC20 ABI for approve and allowance
       const erc20Abi = [
@@ -235,7 +235,7 @@ export function useBlindEscrowV2(contractAddress: string) {
       const erc20 = new ethers.Contract(paymentToken, erc20Abi, buyerSigner);
       
       // Check and approve if needed
-      const allowance = await erc20.allowance(userAddress, contractAddress);
+      const allowance = await erc20.allowance(buyerAddr, contractAddress);
       if (allowance < BigInt(amount)) {
         const txApprove = await erc20.approve(contractAddress, amount);
         await txApprove.wait();
@@ -247,35 +247,25 @@ export function useBlindEscrowV2(contractAddress: string) {
         BlindEscrowV2ABI,
         buyerSigner
       );
-      
-      // Encrypt bid using FHEVM instance
+
+      // ✅ Sử dụng FHEVM instance (client-side pattern)
       if (!instance) {
         throw new Error(`FHEVM instance not available. Status: ${status}, Provider: ${!!provider}, ChainId: ${chainId}`);
       }
-      
-      const inputBid = instance.createEncryptedInput(contractAddress, buyerSigner.address);
-      inputBid.add32(bid);
-      const encBidResult = await inputBid.encrypt();
-      
-      // Convert FHEVM result to string format expected by contract
-      const encBid = `0x${Buffer.from(encBidResult.inputProof).toString('hex')}`;
-      
-      console.log("Encrypted bid:", {
-        encBid,
-        lenBid: encBid?.length,
-      });
 
-      // Validate ciphertext
-      if (!looksLikeCiphertext(encBid)) {
-        throw new Error("Encryption failed: not a valid FHE ciphertext");
-      }
+      // ✅ TẠO HANDLE BẰNG FHEVM instance cho bid
+      const encB = await instance.createEncryptedInput(contractAddress, buyerAddr);
+      encB.add32(bid); // euint32
+      const encResult = await encB.encrypt();
+      const encBidHandle = `0x${Buffer.from(encResult.handles[0]).toString('hex')}`;
       
-      const tx = await contract.placeBid(dealId, encBid);
-      return await tx.wait();
+      console.log("[CHK] bid handle len:", encBidHandle.length); // ~66
+
+      await (contract as any).connect(buyerSigner).placeBid(BigInt(dealId), encBidHandle);
     } finally { 
       setBusy(false); 
     }
-  }, [contractAddress, getSigner, instance]);
+  }, [getSigner, instance, status, provider, chainId]);
 
   const computeOutcome = useCallback(async (dealId: bigint) => {
     setBusy(true);
@@ -358,8 +348,8 @@ export function useBlindEscrowV2(contractAddress: string) {
     }
   }, [contractAddress, getSigner]);
 
-  return {
-    busy,
+  return { 
+    busy, 
     isFhevmReady,
     fhevmStatus: status,
     fhevmError: error,
