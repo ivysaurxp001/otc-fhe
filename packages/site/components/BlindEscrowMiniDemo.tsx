@@ -2,51 +2,31 @@
 
 import { useState, useEffect } from "react";
 import { ethers } from "ethers";
-import { useBlindEscrowV2 } from "../hooks/useBlindEscrowV2";
+import { useBlindEscrowMini } from "../hooks/useBlindEscrowMini";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-// import { Loader2, CheckCircle, XCircle } from "lucide-react";
-
-// ERC20 tokens from environment variables
-const TOKENS = [
-  { 
-    address: process.env.NEXT_PUBLIC_USDC_ADDRESS || "0x1234567890123456789012345678901234567890", 
-    symbol: "USDC", 
-    decimals: 6 
-  },
-  { 
-    address: process.env.NEXT_PUBLIC_USDT_ADDRESS || "0x2345678901234567890123456789012345678901", 
-    symbol: "USDT", 
-    decimals: 6 
-  },
-  { 
-    address: process.env.NEXT_PUBLIC_DAI_ADDRESS || "0x3456789012345678901234567890123456789012", 
-    symbol: "DAI", 
-    decimals: 18 
-  },
-];
 
 interface DealState {
   id: bigint | null;
-  mode: 0 | 1;
-  token: string;
+  buyer: string;
   amount: string;
-  buyerOpt: string;
   ask: string;
-  threshold: string;
   bid: string;
   currentStep: number;
   dealInfo: any;
 }
 
-export default function BlindEscrowDemo() {
-  const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x38F3f250C4AD10d34b79558541d0db25C2c0b74d";
+export default function BlindEscrowMiniDemo() {
+  const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
   
-  console.log("Contract address in component:", contractAddress);
+  console.log("🔍 Environment Debug:", {
+    NEXT_PUBLIC_CONTRACT_ADDRESS: process.env.NEXT_PUBLIC_CONTRACT_ADDRESS,
+    contractAddress: contractAddress,
+    isCorrectAddress: contractAddress === "0x38F3f250C4AD10d34b79558541d0db25C2c0b74d"
+  });
   const { 
     busy, 
     isFhevmReady,
@@ -58,19 +38,16 @@ export default function BlindEscrowDemo() {
     computeOutcome,
     finalizeWithOracle,
     getDealInfo 
-  } = useBlindEscrowV2(contractAddress);
+  } = useBlindEscrowMini(contractAddress);
 
   // Check if contract is deployed
   const isContractDeployed = contractAddress !== "0x0000000000000000000000000000000000000000";
 
   const [deal, setDeal] = useState<DealState>({
     id: null,
-    mode: 0,
-    token: "",
+    buyer: "",
     amount: "",
-    buyerOpt: "",
     ask: "",
-    threshold: "",
     bid: "",
     currentStep: 1,
     dealInfo: null
@@ -86,11 +63,9 @@ export default function BlindEscrowDemo() {
     isFhevmReady,
     fhevmStatus,
     fhevmError,
-    dealToken: deal.token,
+    dealBuyer: deal.buyer,
     dealAmount: deal.amount,
-    dealMode: deal.mode,
-    dealBuyerOpt: deal.buyerOpt,
-    buttonDisabled: busy || !deal.token || !deal.amount || (deal.mode === 0 && !deal.buyerOpt)
+    buttonDisabled: busy || !deal.buyer || !deal.amount
   });
 
   // Step 1: Create Deal
@@ -98,48 +73,23 @@ export default function BlindEscrowDemo() {
     clearError();
     try {
       // Validation
-      if (deal.mode !== 0 && deal.mode !== 1) {
-        throw new Error(`Invalid mode: ${deal.mode}. Must be 0 (P2P) or 1 (OPEN)`);
-      }
-      if (!deal.token || deal.token === "0x0000000000000000000000000000000000000000") {
-        throw new Error("Please select a valid token");
+      if (!deal.buyer || deal.buyer === "0x0000000000000000000000000000000000000000") {
+        throw new Error("Please enter buyer address");
       }
       if (!deal.amount || parseFloat(deal.amount) <= 0) {
-        throw new Error("Please enter a valid amount");
-      }
-      if (deal.mode === 0 && (!deal.buyerOpt || deal.buyerOpt === "0x0000000000000000000000000000000000000000")) {
-        throw new Error("Please enter buyer address for P2P mode");
+        throw new Error("Please enter a valid ETH amount");
       }
       
       console.log("Creating deal with params:", {
-        mode: deal.mode,
-        modeType: typeof deal.mode,
-        token: deal.token,
-        amount: deal.amount,
-        buyerOpt: deal.buyerOpt
+        buyer: deal.buyer,
+        amount: deal.amount
       });
       
-      // Get token decimals
-      const selectedToken = TOKENS.find(t => t.address === deal.token);
-      const decimals = selectedToken?.decimals || 18;
+      const result = await createDeal(deal.buyer, deal.amount);
       
-      const result = await createDeal(
-        deal.mode,
-        deal.token,
-        ethers.parseUnits(deal.amount, decimals).toString(), // Use correct decimals
-        deal.buyerOpt || undefined
-      );
-      
-      // Extract deal ID from event
-      const event = result.logs.find((log: any) => log.topics[0] === ethers.id("DealCreated(uint256,uint8,address,address,address,uint256)"));
-      if (event) {
-        const dealId = BigInt(event.topics[1]);
-        console.log("Deal created successfully! Deal ID:", dealId.toString());
-        setDeal(prev => ({ ...prev, id: dealId, currentStep: 2 }));
-        setTxHash(result.hash);
-      } else {
-        console.error("DealCreated event not found in logs:", result.logs);
-      }
+      console.log("Deal created successfully! Deal ID:", result.dealId.toString());
+      setDeal(prev => ({ ...prev, id: result.dealId, currentStep: 2 }));
+      setTxHash(result.receipt.hash);
     } catch (err: any) {
       setError(err.message || "Failed to create deal");
     }
@@ -155,13 +105,12 @@ export default function BlindEscrowDemo() {
     }
     
     console.log("Seller submit with deal ID:", deal.id.toString());
-    console.log("Ask:", deal.ask, "Threshold:", deal.threshold);
+    console.log("Ask:", deal.ask);
     
     try {
       await sellerSubmit(
         deal.id,
-        parseInt(deal.ask),
-        parseInt(deal.threshold)
+        parseInt(deal.ask)
       );
       setDeal(prev => ({ ...prev, currentStep: 3 }));
     } catch (err: any) {
@@ -178,9 +127,7 @@ export default function BlindEscrowDemo() {
     try {
       await placeBid(
         deal.id,
-        parseInt(deal.bid),
-        deal.token,
-        ethers.parseUnits(deal.amount, 18).toString()
+        parseInt(deal.bid)
       );
       setDeal(prev => ({ ...prev, currentStep: 4 }));
     } catch (err: any) {
@@ -202,7 +149,7 @@ export default function BlindEscrowDemo() {
     }
   };
 
-  // Step 5: Finalize with Oracle
+  // Step 5: Oracle Finalize
   const handleFinalizeWithOracle = async () => {
     clearError();
     if (!deal.id) return;
@@ -231,12 +178,9 @@ export default function BlindEscrowDemo() {
   const resetDemo = () => {
     setDeal({
       id: null,
-      mode: 0,
-      token: "",
+      buyer: "",
       amount: "",
-      buyerOpt: "",
       ask: "",
-      threshold: "",
       bid: "",
       currentStep: 1,
       dealInfo: null
@@ -248,17 +192,18 @@ export default function BlindEscrowDemo() {
   return (
     <div className="container mx-auto p-6 max-w-4xl">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Blind Escrow V2 Demo</h1>
+        <h1 className="text-3xl font-bold mb-2">Blind Escrow Mini Demo</h1>
         <p className="text-gray-600">
-          Giao dịch mù với Fully Homomorphic Encryption - Logic định giá được giữ kín
+          Giao dịch mù tối thiểu với FHE - Chỉ P2P, ETH escrow, so sánh bid ≤ ask
         </p>
       </div>
+
 
       {!isContractDeployed && (
         <Alert className="mb-6" variant="destructive">
           <AlertDescription>
             ❌ <strong>Contract chưa được deploy!</strong><br/>
-            Vui lòng deploy contract BlindEscrowV2 trước khi sử dụng.<br/>
+            Vui lòng deploy contract BlindEscrowMini trước khi sử dụng.<br/>
             Contract Address: <code className="text-sm">{contractAddress}</code>
           </AlertDescription>
         </Alert>
@@ -269,9 +214,7 @@ export default function BlindEscrowDemo() {
           <AlertDescription>
             ✅ <strong>Contract đã được deploy!</strong><br/>
             Contract Address: <code className="text-sm">{contractAddress}</code><br/>
-            Oracle Address: <code className="text-sm">{process.env.NEXT_PUBLIC_ORACLE_ADDRESS}</code><br/>
-            FHEVM Status: <code className="text-sm">{isFhevmReady ? '✅ Ready' : `⏳ ${fhevmStatus}`}</code><br/>
-            Network: {process.env.NEXT_PUBLIC_NETWORK} (Chain ID: {process.env.NEXT_PUBLIC_CHAIN_ID})
+            FHEVM Status: <code className="text-sm">{isFhevmReady ? '✅ Ready' : `⏳ ${fhevmStatus}`}</code>
           </AlertDescription>
         </Alert>
       )}
@@ -322,71 +265,35 @@ export default function BlindEscrowDemo() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <span className="text-blue-500">1.</span>
-                Create Deal
+                Create Deal (P2P)
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <Label htmlFor="mode">Deal Mode</Label>
-                <Select 
-                  value={deal.mode.toString()} 
-                  onValueChange={(value) => setDeal(prev => ({ ...prev, mode: parseInt(value) as 0 | 1 }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="0">P2P (Private)</SelectItem>
-                    <SelectItem value="1">OPEN (Public)</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="buyer">Buyer Address</Label>
+                <Input
+                  id="buyer"
+                  placeholder="0x..."
+                  value={deal.buyer}
+                  onChange={(e) => setDeal(prev => ({ ...prev, buyer: e.target.value }))}
+                />
               </div>
 
               <div>
-                <Label htmlFor="token">Payment Token</Label>
-                <Select 
-                  value={deal.token} 
-                  onValueChange={(value) => setDeal(prev => ({ ...prev, token: value }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select token" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {TOKENS.map((token) => (
-                      <SelectItem key={token.address} value={token.address}>
-                        {token.symbol}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div>
-                <Label htmlFor="amount">Amount (PUBLIC)</Label>
+                <Label htmlFor="amount">ETH Amount (PUBLIC)</Label>
                 <Input
                   id="amount"
                   type="number"
-                  placeholder="100"
+                  step="0.001"
+                  placeholder="0.1"
                   value={deal.amount}
                   onChange={(e) => setDeal(prev => ({ ...prev, amount: e.target.value }))}
                 />
               </div>
 
-              {deal.mode === 0 && (
-                <div>
-                  <Label htmlFor="buyerOpt">Buyer Address (P2P)</Label>
-                  <Input
-                    id="buyerOpt"
-                    placeholder="0x..."
-                    value={deal.buyerOpt}
-                    onChange={(e) => setDeal(prev => ({ ...prev, buyerOpt: e.target.value }))}
-                  />
-                </div>
-              )}
-
               <Button 
                 onClick={handleCreateDeal} 
-                disabled={busy || !deal.token || !deal.amount || (deal.mode === 0 && !deal.buyerOpt)}
+                disabled={busy || !deal.buyer || !deal.amount}
                 className="w-full"
               >
                 {busy && <span className="mr-2">⏳</span>}
@@ -419,27 +326,13 @@ export default function BlindEscrowDemo() {
                   </p>
                 </div>
 
-                <div>
-                  <Label htmlFor="threshold">Threshold (ENCRYPTED)</Label>
-                  <Input
-                    id="threshold"
-                    type="number"
-                    placeholder="1200"
-                    value={deal.threshold}
-                    onChange={(e) => setDeal(prev => ({ ...prev, threshold: e.target.value }))}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Ngưỡng giá tối đa (được mã hóa)
-                  </p>
-                </div>
-
                 <Button 
                   onClick={handleSellerSubmit} 
-                  disabled={busy || !isFhevmReady || !deal.ask || !deal.threshold}
+                  disabled={busy || !isFhevmReady || !deal.ask}
                   className="w-full"
                 >
                   {busy && <span className="mr-2">⏳</span>}
-                  Submit Encrypted Data
+                  Submit Encrypted Ask
                 </Button>
               </CardContent>
             </Card>
@@ -465,7 +358,7 @@ export default function BlindEscrowDemo() {
                     onChange={(e) => setDeal(prev => ({ ...prev, bid: e.target.value }))}
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Giá mua (được mã hóa) + Escrow amount
+                    Giá mua (được mã hóa) + ETH escrow
                   </p>
                 </div>
 
@@ -475,7 +368,7 @@ export default function BlindEscrowDemo() {
                   className="w-full"
                 >
                   {busy && <span className="mr-2">⏳</span>}
-                  Place Bid & Escrow
+                  Place Bid & Escrow ETH
                 </Button>
               </CardContent>
             </Card>
@@ -492,7 +385,7 @@ export default function BlindEscrowDemo() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-sm text-gray-600">
-                  FHE sẽ so sánh: bid ≤ ask && ask ≤ threshold
+                  FHE sẽ so sánh: bid ≤ ask (encrypted)
                 </p>
 
                 <Button 
@@ -546,14 +439,12 @@ export default function BlindEscrowDemo() {
                   <div className="grid grid-cols-2 gap-2 text-sm">
                     <span className="font-medium">Deal ID:</span>
                     <span>{deal.id?.toString()}</span>
-                    <span className="font-medium">Mode:</span>
-                    <span>{deal.dealInfo.mode === 0 ? "P2P" : "OPEN"}</span>
                     <span className="font-medium">State:</span>
                     <span>
                       {deal.dealInfo.state === 0 && "None"}
                       {deal.dealInfo.state === 1 && "Created"}
-                      {deal.dealInfo.state === 2 && "A_Submitted"}
-                      {deal.dealInfo.state === 3 && "Ready"}
+                      {deal.dealInfo.state === 2 && "Ready"}
+                      {deal.dealInfo.state === 3 && "OutcomeComputed"}
                       {deal.dealInfo.state === 4 && "Settled"}
                       {deal.dealInfo.state === 5 && "Canceled"}
                     </span>
@@ -562,7 +453,7 @@ export default function BlindEscrowDemo() {
                     <span className="font-medium">Buyer:</span>
                     <span className="font-mono text-xs">{deal.dealInfo.buyer}</span>
                     <span className="font-medium">Amount:</span>
-                    <span>{ethers.formatEther(deal.dealInfo.amount)}</span>
+                    <span>{ethers.formatEther(deal.dealInfo.amount)} ETH</span>
                     <span className="font-medium">Success:</span>
                     <span className={deal.dealInfo.success ? "text-green-600" : "text-red-600"}>
                       {deal.dealInfo.success ? "✓ Match" : "✗ No Match"}
@@ -573,12 +464,12 @@ export default function BlindEscrowDemo() {
                 <div className="space-y-3">
                   <p className="text-gray-500">No deal information available</p>
                   <div className="text-xs text-gray-400">
-                    <div><strong>Available Tokens:</strong></div>
-                    {TOKENS.map((token) => (
-                      <div key={token.address} className="ml-2">
-                        {token.symbol}: <code className="text-xs">{token.address}</code>
-                      </div>
-                    ))}
+                    <div><strong>Flow:</strong></div>
+                    <div className="ml-2">1. Seller tạo deal với buyer</div>
+                    <div className="ml-2">2. Seller submit ask (encrypted)</div>
+                    <div className="ml-2">3. Buyer place bid + escrow ETH</div>
+                    <div className="ml-2">4. Compute outcome: bid ≤ ask</div>
+                    <div className="ml-2">5. Oracle finalize</div>
                   </div>
                 </div>
               )}
@@ -587,21 +478,19 @@ export default function BlindEscrowDemo() {
 
           <Card>
             <CardHeader>
-              <CardTitle>FHE Logic</CardTitle>
+              <CardTitle>FHE Logic (Mini)</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div className="bg-gray-50 p-3 rounded text-sm font-mono">
                 <div className="text-gray-600 mb-2">Encrypted Values:</div>
                 <div>ask: euint32 (hidden)</div>
-                <div>threshold: euint32 (hidden)</div>
                 <div>bid: euint32 (hidden)</div>
               </div>
               
               <div className="bg-gray-50 p-3 rounded text-sm font-mono">
                 <div className="text-gray-600 mb-2">FHE Comparison:</div>
-                <div>ok1 = FHE.le(bid, ask)</div>
-                <div>ok2 = FHE.le(ask, threshold)</div>
-                <div>success = FHE.and(ok1, ok2)</div>
+                <div>encOutcome = FHE.le(bid, ask)</div>
+                <div>// bid ≤ ask (encrypted)</div>
               </div>
 
               <div className="bg-gray-50 p-3 rounded text-sm font-mono">
@@ -609,9 +498,9 @@ export default function BlindEscrowDemo() {
                 <div>1. FHE.computeOutcome() → encOutcome</div>
                 <div>2. Oracle decrypts encOutcome</div>
                 <div>3. Oracle signs outcome</div>
-                <div>4. finalizeWithOracle(outcome, signature)</div>
+                <div>4. finalizeWithOracle(outcome, sig)</div>
                 <div className="text-xs text-gray-500 mt-1">
-                  Only the boolean outcome is revealed publicly
+                  Only the boolean outcome is revealed
                 </div>
               </div>
             </CardContent>

@@ -83,7 +83,16 @@
     "test": "hardhat test",
     "test:sepolia": "hardhat test --network sepolia",
     "build:ts": "tsc --project tsconfig.json",
-    "typechain": "cross-env TS_NODE_TRANSPILE_ONLY=true hardhat typechain"
+    "typechain": "cross-env TS_NODE_TRANSPILE_ONLY=true hardhat typechain",
+    "deploy:local": "hardhat run scripts/deployBlindEscrowMiniLocal.ts --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deployBlindEscrowMiniSepolia.ts --network sepolia",
+    "deploy:auto": "chmod +x scripts/deploy-and-start.sh && ./scripts/deploy-and-start.sh",
+    "deploy:auto:win": "scripts/deploy-and-start.bat",
+    "node": "hardhat node --hostname 0.0.0.0",
+    "node:deploy": "npm run node & sleep 10 && npm run deploy:local",
+    "setup:env": "node scripts/setup-env.js",
+    "setup:sepolia": "npm run setup:env && npm run deploy:sepolia",
+    "test:contract": "hardhat run scripts/testContractState.ts --network sepolia"
   },
   "overrides": {
     "ws@>=7.0.0 <7.5.10": ">=7.5.10",

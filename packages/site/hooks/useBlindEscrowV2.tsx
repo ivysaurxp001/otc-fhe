@@ -114,21 +114,17 @@ export function useBlindEscrowV2(contractAddress: string) {
   ) => {
     setBusy(true);
     try {
-      const dealIdNum = BigInt(dealId);                      // ✅ đảm bảo là BigInt
-      const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS!;
-      const sellerSigner = await getSigner();
-      const contract = new ethers.Contract(
-        contractAddress,
-        BlindEscrowV2ABI,
-        sellerSigner
-      );
-      const sellerAddr = await sellerSigner.getAddress();
 
       console.log("SellerSubmit parameters:", {
-        dealId: dealIdNum.toString(),
+        dealId: dealId.toString(),
         ask,
         threshold
       });
+
+      // ✅ dùng address từ props (hook) thay vì env cho thống nhất
+      const sellerSigner = await getSigner();
+      const sellerAddr   = await sellerSigner.getAddress();
+      const contract     = new ethers.Contract(contractAddress, BlindEscrowV2ABI, sellerSigner);
 
       // Check contract first
       try {
@@ -141,7 +137,7 @@ export function useBlindEscrowV2(contractAddress: string) {
 
       // Check deal state first
       try {
-        const dealInfo = await contract.getDealPublic(dealIdNum);
+        const dealInfo = await contract.getDealPublic(BigInt(dealId));
         console.log("Deal info before submit:", {
           mode: dealInfo[0].toString(),
           state: dealInfo[1].toString(),
@@ -174,38 +170,29 @@ export function useBlindEscrowV2(contractAddress: string) {
         throw new Error(`FHEVM instance not available. Status: ${status}, Provider: ${!!provider}, ChainId: ${chainId}`);
       }
 
-      // ✅ Kiểm tra selector để chắc chữ ký đúng
-      const iface = new Interface([
-        "function sellerSubmit(uint256 id, euint32 encAsk, euint32 encThreshold)"
-      ]);
-      console.log("[CHK] selector", iface.getFunction("sellerSubmit")!.selector); // 0x9c135429
+      // ✅ kiểm tra selector (0x9c135429)
+      const iface = new Interface(BlindEscrowV2ABI);
+      console.log("[CHK] selector", iface.getFunction("sellerSubmit")!.selector);
 
-      // ✅ TẠO HANDLE BẰNG FHEVM instance với đúng pattern
+      // ✅ tạo handle đúng pattern UMD: createEncryptedInput(contract, user) + encrypt(signature)
       const enc = await instance.createEncryptedInput(contractAddress, sellerAddr);
-      enc.add32(ask);        // euint32 #1
-      enc.add32(threshold);  // euint32 #2
-      
-      const encResult = await enc.encrypt();
-      
-      const encAskHandle = `0x${Buffer.from(encResult.handles[0]).toString('hex')}`;
-      const encThrHandle = `0x${Buffer.from(encResult.handles[1]).toString('hex')}`;
+enc.add32(ask);        // euint32 #0 (theo e-params)
+enc.add32(threshold);  // euint32 #1
 
-      console.log("[CHK] handles len", encAskHandle.length, encThrHandle.length); // ~66,66
+// ✅ TRUYỀN ĐÚNG function signature vào encrypt(...)
+const encRes = await enc.encrypt("sellerSubmit(uint256,euint32,euint32)");
 
-      // ✅ GỌI BẰNG sellerSigner (đúng vai trò)
-      // (Optional) Thử static trước: nếu pass thì send tx
-      await (contract as any).connect(sellerSigner).callStatic.sellerSubmit(
-        dealIdNum,
-        encAskHandle,
-        encThrHandle
-      );
+const encAskHandle = ethers.hexlify(encRes.handles[0]); // 0x + 64 hex
+const encThrHandle = ethers.hexlify(encRes.handles[1]);
+console.log("[CHK] handles len", encAskHandle.length, encThrHandle.length); // ~66, ~66
 
-      const tx = await (contract as any).connect(sellerSigner).sellerSubmit(
-        dealIdNum,
-        encAskHandle,
-        encThrHandle
-      );
-      await tx.wait();
+// gửi tx (đừng dùng simulate/callStatic với ethers v6)
+const tx = await (contract as any).sellerSubmit(
+  BigInt(dealId),
+  encAskHandle,
+  encThrHandle
+);
+await tx.wait();
     } catch (error: any) {
       console.error("SellerSubmit error:", error);
       throw error;

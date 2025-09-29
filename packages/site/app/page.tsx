@@ -1,5 +1,5 @@
-import BlindEscrowDemo from "@/components/BlindEscrowDemo";
+import BlindEscrowMiniDemo from "@/components/BlindEscrowMiniDemo";
 
 export default function Home() {
-  return <BlindEscrowDemo />;
+  return <BlindEscrowMiniDemo />;
 }
